@@ -140,7 +140,12 @@ class TargetModel:
         return query_fn
 
     def predict(self, x: Tensor) -> int:
-        """Single-image prediction — used for early-stop check."""
+        """Single-image prediction — counts as one query."""
+        if self._count + 1 > self.budget:
+            raise QueryBudgetExceeded(
+                f"Query budget {self.budget} exceeded at predict() call"
+            )
+        self._count += 1
         with torch.no_grad():
             x_norm = (x.unsqueeze(0) - self._mean) / self._std
             logits = self._model(x_norm)

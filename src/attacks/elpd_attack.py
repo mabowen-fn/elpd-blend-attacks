@@ -114,7 +114,7 @@ def elpd_blend_attack(
         x_flat  = x_flat.clamp(acfg.clip_min, acfg.clip_max)
         x       = x_flat.view_as(x_orig)
 
-        q_cumul = estimator.total_queries
+        q_cumul = target.queries_used   # NES queries + predict() checks
         eta_history.append(blend.eta_smoothed)
         query_history.append(q_cumul)
 
@@ -130,8 +130,10 @@ def elpd_blend_attack(
             )
 
         # ── 6. Early stop ─────────────────────────────────────────────────
+        # predict() counts as a query — add it to the cumulative total.
         if acfg.early_stop:
             pred = target.predict(x)
+            q_cumul = target.queries_used
             if pred != true_label:
                 logger.debug("Attack succeeded at step %d (queries=%d).", step, q_cumul)
                 return AttackResult(
@@ -145,6 +147,6 @@ def elpd_blend_attack(
     success = (pred != true_label)
     return AttackResult(
         success=success, adv_x=x,
-        queries_used=estimator.total_queries, steps_taken=acfg.num_steps,
+        queries_used=target.queries_used, steps_taken=acfg.num_steps,
         eta_history=eta_history, query_history=query_history,
     )

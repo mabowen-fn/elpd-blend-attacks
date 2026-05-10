@@ -173,11 +173,10 @@ def run_nes_only(
         query_history.append(q_cumul)
 
         if acfg.early_stop and target.predict(x) != true_label:
-            return AttackResult(True, x, q_cumul, step + 1, eta_history, query_history)
+            return AttackResult(True, x, target.queries_used, step + 1, eta_history, query_history)
 
-    q_cumul = estimator.total_queries
     success = target.predict(x) != true_label
-    return AttackResult(success, x, q_cumul, acfg.num_steps, eta_history, query_history)
+    return AttackResult(success, x, target.queries_used, acfg.num_steps, eta_history, query_history)
 
 
 # ── Static Hybrid (fixed η) ───────────────────────────────────────────────────
@@ -225,11 +224,10 @@ def run_static_hybrid(
         query_history.append(q_cumul)
 
         if acfg.early_stop and target.predict(x) != true_label:
-            return AttackResult(True, x, q_cumul, step + 1, eta_history, query_history)
+            return AttackResult(True, x, target.queries_used, step + 1, eta_history, query_history)
 
-    q_cumul = estimator.total_queries
     success = target.predict(x) != true_label
-    return AttackResult(success, x, q_cumul, acfg.num_steps, eta_history, query_history)
+    return AttackResult(success, x, target.queries_used, acfg.num_steps, eta_history, query_history)
 
 
 # ── Square Attack (score-based, no gradient) ──────────────────────────────────

@@ -23,7 +23,7 @@ wandb:
 dataset:
   name: "cifar10"                    # "cifar10" (local dev) | "imagenet" (AutoDL)
   root: "data"                       # local: adversarial_ml/data/
-  num_samples: 100                   # 100 for local dev; 1000 for full AutoDL run
+  num_samples: 50                    # 50 for local dev; 1000 for full AutoDL run
   batch_size: 50
   num_workers: 0                     # 0 for MPS compatibility (no forked workers)
   # ImageNet normalization (also used for CIFAR-10 with pretrained models)
@@ -49,20 +49,20 @@ models:
 
 # ── Attack Constraints (L∞ threat model) ─────────────────────────────────
 attack:
-  epsilon: 0.05                      # L∞ budget  (≈ 12.75/255 for [0,1] space)
-  step_size: 0.005                   # α per iteration
+  epsilon: 0.01                      # L∞ budget (~2.55/255) — tight, realistic
+  step_size: 0.001                   # α per iteration
   num_steps: 100                     # T — total attack iterations
   targeted: false                    # false → untargeted (maximise loss)
   clip_min: 0.0
   clip_max: 1.0
-  query_budget: 5000                 # hard cap on target queries per image
+  query_budget: 3000                 # hard cap on target queries per image
   early_stop: true                   # stop once prediction flips
 
 # ── Query-Based Gradient Estimator (Finite Differences / NES) ────────────
 query_estimator:
   method: "nes"                      # "nes" | "spsa" | "fd_central"
   # NES / SPSA shared
-  n_samples: 10                      # q — antithetic pairs (10 local, 20 AutoDL)
+  n_samples: 20                      # q — antithetic pairs (20 local, 40 AutoDL)
   sigma: 0.001                       # σ — smoothing / finite-difference radius
   # SPSA-only (ignored for nes/fd_central)
   spsa_c: 0.001
