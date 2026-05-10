@@ -311,6 +311,18 @@ class ELPDBlender:
         eta_raw  = float(self.eta_grid[best_idx].item())
         eta_raw  = max(self.cfg.eta_min, min(self.cfg.eta_max, eta_raw))
 
+        # Surrogate alignment guard: if cosine similarity is near-zero, the
+        # surrogate provides no directional signal — clamp η to 0 to avoid
+        # burning queries on a useless blend direction.
+        cos_sur_tgt = float(
+            torch.nn.functional.cosine_similarity(
+                g_sur_norm.unsqueeze(0), ĝ_target.unsqueeze(0)
+            ).item()
+        )
+        alignment_threshold = getattr(self.cfg, 'min_alignment', 0.05)
+        if abs(cos_sur_tgt) < alignment_threshold:
+            eta_raw = 0.0
+
         # ── Step 5: EMA smoothing to prevent erratic η trajectories ───────
         # Without smoothing, noisy ELPD estimates cause η to oscillate wildly,
         # wasting queries by repeatedly reversing the blend direction.
@@ -334,11 +346,7 @@ class ELPDBlender:
             "elpd_at_eta_raw":  float(elpd_scores[best_idx].item()),
             "elpd_at_eta0":     float(elpd_scores[0].item()),   # pure query
             "elpd_at_eta1":     float(elpd_scores[-1].item()),  # pure transfer
-            "cosine_sim_sur_tgt": float(
-                torch.nn.functional.cosine_similarity(
-                    g_sur_norm.unsqueeze(0), ĝ_target.unsqueeze(0)
-                ).item()
-            ),
+            "cosine_sim_sur_tgt": cos_sur_tgt,
             "target_grad_var":  float(g_tgt_norm.var(dim=0).mean().item()),
             "n_target_draws":   q,
             "step":             self._step_count,

@@ -91,9 +91,10 @@ elpd_blender:
   cosine_var:
     var_weight: 0.5                  # trade-off between alignment and certainty
   # η smoothing: EMA over steps to prevent erratic blending
-  eta_ema_alpha: 0.3                 # α_ema; lower → smoother η trajectory
+  eta_ema_alpha: 0.6                 # α_ema; higher → faster tracking of alignment changes
   eta_min: 0.0                       # hard floor
   eta_max: 1.0                       # hard ceiling
+  min_alignment: 0.05                # cosine threshold below which η is forced to 0
 
 # ── Momentum (MI-FGSM style) ──────────────────────────────────────────────
 momentum:

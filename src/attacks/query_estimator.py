@@ -90,17 +90,18 @@ def nes_gradient(
         f_neg    = f_neg - baseline
 
     # NES gradient: ĝ = (1/qσ) Σ_k u_k (f_pos_k - f_neg_k)
-    # Per-draw contributions (before summing): shape (q, D)
-    # These are the individual "observations" for the ELPD blender.
-    delta_f    = (f_pos - f_neg).unsqueeze(1)                 # (q, 1)
-    draws_pos  = delta_f * u / (2.0 * sigma)                  # (q, D)
-    draws_neg  = -draws_pos                                    # (q, D) antithetic
+    # Per-draw contributions: shape (q, D)
+    # Only pass draws_pos to the blender — draws_neg = -draws_pos are not
+    # independent observations; they're mathematical negatives that cancel
+    # perfectly and destroy the ELPD surface (mean → 0 identically).
+    delta_f   = (f_pos - f_neg).unsqueeze(1)                  # (q, 1)
+    draws_pos = delta_f * u / (2.0 * sigma)                   # (q, D)
 
-    # Final gradient estimate: mean over all 2q "draws"
-    all_draws = torch.cat([draws_pos, draws_neg], dim=0)      # (2q, D)
-    g_hat     = all_draws.mean(dim=0)                         # (D,)
+    # Full gradient estimate uses both pos and neg for variance reduction,
+    # but the draws exposed to ELPDBlender are the q independent estimates.
+    g_hat = draws_pos.mean(dim=0)                              # (D,)
 
-    return g_hat, all_draws, 2 * n_samples
+    return g_hat, draws_pos, 2 * n_samples
 
 
 # ── SPSA estimator ────────────────────────────────────────────────────────────
@@ -142,14 +143,11 @@ def spsa_gradient(
         f_neg    = f_neg - baseline
 
     # SPSA gradient: ĝ_k = (f+ − f−) / (2σ * δ_k)
-    # Element-wise division — shape (n_samples, D)
-    g_per_sample = (f_pos - f_neg).unsqueeze(1) / (2.0 * sigma * delta)
+    # Each sample gives one independent estimate — these are the blender draws.
+    g_per_sample = (f_pos - f_neg).unsqueeze(1) / (2.0 * sigma * delta)  # (q, D)
     g_hat        = g_per_sample.mean(dim=0)                   # (D,)
 
-    # For ELPDBlender, treat each sample's gradient estimate as a draw
-    all_draws = torch.cat([g_per_sample, -g_per_sample], dim=0)  # (2q, D) antithetic
-
-    return g_hat, all_draws, 2 * n_samples
+    return g_hat, g_per_sample, 2 * n_samples
 
 
 # ── Dispatcher ────────────────────────────────────────────────────────────────
