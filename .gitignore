@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environment
+.venv/
+venv/
+env/
+ENV/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Data — CIFAR-10 auto-downloaded, ImageNet must be provided separately
+data/
+
+# Results — logs and CSVs are reproducible; plots are generated outputs
+results/logs/
+results/checkpoints/
+results/plots/
+
+# W&B local run cache
+wandb/
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# Claude Code internal
+.claude/
+CLAUDE.md
+
+# PDFs (source paper — not redistributable)
+*.pdf
+
+# Scratch notebooks at repo root
+Untitled.ipynb
+Untitled-*.ipynb
+
+# Stale notebook directories created by Jupyter Lab drag-and-drop
+notebooks/configs/
+notebooks/notebooks/
+notebooks/results/
+notebooks/scripts/
+notebooks/src/
+
+explain
