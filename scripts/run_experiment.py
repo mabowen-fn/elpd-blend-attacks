@@ -3,13 +3,15 @@ run_experiment.py — Full evaluation script. Runs all attacks on the configured
 dataset and writes results to results/logs/. Also produces Query-vs-ASR and
 η trajectory plots.
 
-Usage:
-    .venv/bin/python scripts/run_experiment.py
-    .venv/bin/python scripts/run_experiment.py --n_images 20   # quick test
-    .venv/bin/python scripts/run_experiment.py --steps 20      # fewer steps
+Usage (local):
+    python scripts/run_experiment.py
+    python scripts/run_experiment.py --n_images 20 --steps 20 --no_wandb
 
-The script runs ELPD-Blend + all baselines on each image and logs everything
-to results/logs/final_results.csv and results/logs/run_metrics.csv.
+Usage (AutoDL / GPU):
+    python scripts/run_experiment.py --config configs/config_autodl.yaml
+
+Resume a crashed run (skips already-completed images):
+    python scripts/run_experiment.py --config configs/config_autodl.yaml --resume
 """
 
 import argparse
@@ -20,7 +22,7 @@ import warnings
 
 import pandas as pd
 import matplotlib
-matplotlib.use('Agg')   # headless — no display needed
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import torch
 
@@ -46,18 +48,21 @@ from src.attacks.baselines       import (
     run_static_hybrid, run_square_attack,
 )
 
+RESULTS_CSV = 'results/logs/final_results.csv'
+
 
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument('--config',   default='configs/config.yaml')
-    p.add_argument('--n_images', type=int, default=None, help='Override num_samples')
-    p.add_argument('--steps',    type=int, default=None, help='Override num_steps')
-    p.add_argument('--no_wandb', action='store_true',    help='Disable W&B')
+    p.add_argument('--n_images', type=int,  default=None)
+    p.add_argument('--steps',    type=int,  default=None)
+    p.add_argument('--no_wandb', action='store_true')
+    p.add_argument('--resume',   action='store_true',
+                   help='Skip images already in final_results.csv')
     return p.parse_args()
 
 
 def build_asr_curve(df: pd.DataFrame, query_checkpoints: list[int]) -> dict[str, list[float]]:
-    """For each method, compute ASR at each query checkpoint."""
     curves = {}
     for method in df['method'].unique():
         dm = df[df['method'] == method]
@@ -72,12 +77,12 @@ def build_asr_curve(df: pd.DataFrame, query_checkpoints: list[int]) -> dict[str,
 
 def plot_asr_curves(curves: dict, checkpoints: list, cfg, output_path: str):
     styles = {
-        'elpd_blend':   ('steelblue',  '-',  2.5),
-        'mifgsm':       ('green',      '--', 1.5),
-        'difgsm':       ('limegreen',  '--', 1.5),
-        'nes_only':     ('orange',     '-.',  1.5),
-        'static_hybrid':('purple',     ':',  1.5),
-        'square':       ('tomato',     '-.',  1.5),
+        'elpd_blend':    ('steelblue',  '-',   2.5),
+        'mifgsm':        ('green',      '--',  1.5),
+        'difgsm':        ('limegreen',  '--',  1.5),
+        'nes_only':      ('orange',     '-.',  1.5),
+        'static_hybrid': ('purple',     ':',   1.5),
+        'square':        ('tomato',     '-.',  1.5),
     }
     fig, ax = plt.subplots(figsize=(10, 6))
     for method, asr_vals in curves.items():
@@ -103,7 +108,6 @@ def plot_asr_curves(curves: dict, checkpoints: list, cfg, output_path: str):
 
 def plot_eta_trajectory(step_csv: str, output_path: str):
     if not os.path.exists(step_csv):
-        logger.warning('Step CSV not found, skipping η trajectory plot.')
         return
     df = pd.read_csv(step_csv)
     if df.empty:
@@ -135,7 +139,7 @@ def plot_eta_trajectory(step_csv: str, output_path: str):
         ax.axhline(0, color='black', linestyle='--', linewidth=1)
         ax.set_xlabel('Attack Step')
         ax.set_ylabel('Cosine Similarity')
-        ax.set_title('Surrogate–Target Alignment over Steps')
+        ax.set_title('Surrogate–Target Gradient Alignment over Steps')
         ax.grid(alpha=0.3)
 
     plt.tight_layout()
@@ -144,9 +148,25 @@ def plot_eta_trajectory(step_csv: str, output_path: str):
     logger.info('η trajectory saved → %s', output_path)
 
 
+def print_interim_summary(records: list[dict]):
+    """Print a live ASR summary after each image — useful for long GPU runs."""
+    if not records:
+        return
+    df = pd.DataFrame(records)
+    summary = df.groupby('method').agg(
+        ASR=('success', 'mean'),
+        avg_queries=('queries', 'mean'),
+        n=('img_idx', 'nunique'),
+    ).round(3)
+    summary['ASR%'] = (summary['ASR'] * 100).round(1)
+    logger.info('\n--- Interim results (%d images) ---\n%s',
+                df['img_idx'].nunique(),
+                summary[['ASR%', 'avg_queries', 'n']].sort_values('ASR%', ascending=False).to_string())
+
+
 def main():
-    args  = parse_args()
-    cfg   = load_config(args.config)
+    args = parse_args()
+    cfg  = load_config(args.config)
 
     if args.n_images:
         cfg.dataset.num_samples = args.n_images
@@ -155,13 +175,19 @@ def main():
     if args.no_wandb:
         cfg.wandb.enabled = False
 
-    DEVICE = torch.device(
-        cfg.experiment.device
-        if (cfg.experiment.device == 'cpu' or
-            (cfg.experiment.device == 'mps' and torch.backends.mps.is_available()) or
-            (cfg.experiment.device == 'cuda' and torch.cuda.is_available()))
-        else 'cpu'
-    )
+    # ── Device selection ──────────────────────────────────────────────────
+    if cfg.experiment.device == 'cuda' and torch.cuda.is_available():
+        DEVICE = torch.device('cuda')
+        logger.info('GPU: %s  (VRAM: %.1f GB)',
+                    torch.cuda.get_device_name(0),
+                    torch.cuda.get_device_properties(0).total_memory / 1e9)
+    elif cfg.experiment.device == 'mps' and torch.backends.mps.is_available():
+        DEVICE = torch.device('mps')
+    else:
+        DEVICE = torch.device('cpu')
+        if cfg.experiment.device != 'cpu':
+            logger.warning('Requested %s not available — falling back to CPU.',
+                           cfg.experiment.device)
     logger.info('Device: %s', DEVICE)
     torch.manual_seed(cfg.experiment.seed)
 
@@ -169,44 +195,70 @@ def main():
     os.makedirs('results/plots', exist_ok=True)
     dump_config(cfg, f'results/logs/config_snapshot_{cfg.experiment.name}.yaml')
 
+    # ── Resume: load completed image indices ──────────────────────────────
+    completed_imgs: set[int] = set()
+    records: list[dict] = []
+    if args.resume and os.path.exists(RESULTS_CSV):
+        prev = pd.read_csv(RESULTS_CSV)
+        # An image is complete only if ALL methods have a row for it
+        n_methods = sum([
+            1,  # elpd_blend always runs
+            int(cfg.baselines.run_mifgsm),
+            int(cfg.baselines.run_difgsm),
+            int(cfg.baselines.run_nes),
+            int(cfg.baselines.run_square),
+            int(cfg.baselines.run_static_hybrid.enabled),
+        ])
+        counts = prev.groupby('img_idx')['method'].count()
+        completed_imgs = set(counts[counts >= n_methods].index.tolist())
+        records = prev.to_dict('records')
+        logger.info('Resume: %d images already complete, skipping.', len(completed_imgs))
+
     # ── Load models ───────────────────────────────────────────────────────
     logger.info('Loading surrogate: %s', cfg.models.surrogate.arch)
     surrogate = SurrogateModel(cfg.models.surrogate, cfg.dataset, device=DEVICE)
 
     logger.info('Loading target: %s', cfg.models.target.arch)
-    _target_shell = TargetModel(
+
+    # Label probe — unlimited budget, shared across images for label discovery.
+    # On ImageNet we trust dataset labels directly; on CIFAR-10 (local dev) we
+    # use the model's own prediction to avoid the label-space mismatch.
+    _label_probe = TargetModel(
         cfg.models.target, cfg.dataset,
-        query_budget=cfg.attack.query_budget,
-        device=DEVICE, label=0,
+        query_budget=10**9, device=DEVICE, label=0,
     )
 
     # ── Dataset ───────────────────────────────────────────────────────────
     loader = get_dataloader(cfg)
-
     run_logger = RunLogger(cfg)
-    records:  list[dict] = []
-    n_eval    = 0
-
-    # One shared target instance for label discovery (no budget consumed)
-    _label_probe = TargetModel(
-        cfg.models.target, cfg.dataset,
-        query_budget=10**9,
-        device=DEVICE, label=0,
-    )
+    n_eval = 0
 
     for img_idx, (x_batch, y_batch) in enumerate(loader):
-        x_orig = x_batch[0].to(DEVICE)
+        if img_idx in completed_imgs:
+            logger.info('[%04d/%04d] already complete — skipping.',
+                        img_idx, cfg.dataset.num_samples)
+            continue
 
-        # Use the target model's own prediction as the true label.
-        # CIFAR-10 labels (0-9) are incompatible with ImageNet-pretrained models
-        # (0-999), so we always attack the model's current prediction instead.
-        label = _label_probe.predict(x_orig)
+        x_orig    = x_batch[0].to(DEVICE)
+        ds_label  = int(y_batch[0].item())
+
+        # On ImageNet the dataset label IS the ImageNet class index (0-999),
+        # so use it directly. On CIFAR-10 (local dev) the labels are 0-9 and
+        # incompatible, so use the model's own prediction.
+        if cfg.dataset.name == 'imagenet':
+            label = ds_label
+            # Skip images the target already misclassifies
+            if _label_probe.predict(x_orig) != label:
+                logger.debug('Image %d misclassified — skipping.', img_idx)
+                continue
+        else:
+            label = _label_probe.predict(x_orig)
 
         n_eval += 1
         run_logger.start_image(img_idx, label)
         logger.info('[%04d/%04d] label=%d', img_idx, cfg.dataset.num_samples, label)
 
-        def _make_est(seed_offset=0):
+        def _make_est(seed_offset: int = 0):
             t = TargetModel(
                 cfg.models.target, cfg.dataset,
                 query_budget=cfg.attack.query_budget,
@@ -235,14 +287,16 @@ def main():
             t_mi, _ = _make_est(1000)
             res_mi  = run_mifgsm(x_orig, label, surrogate, t_mi, cfg)
             records.append({'img_idx': img_idx, 'label': label, 'method': 'mifgsm',
-                            'success': res_mi.success, 'queries': 0, 'steps': res_mi.steps_taken})
+                            'success': res_mi.success, 'queries': 0,
+                            'steps': res_mi.steps_taken})
 
         # ── DI-FGSM ───────────────────────────────────────────────────────
         if cfg.baselines.run_difgsm:
             t_di, _ = _make_est(2000)
             res_di  = run_difgsm(x_orig, label, surrogate, t_di, cfg)
             records.append({'img_idx': img_idx, 'label': label, 'method': 'difgsm',
-                            'success': res_di.success, 'queries': 0, 'steps': res_di.steps_taken})
+                            'success': res_di.success, 'queries': 0,
+                            'steps': res_di.steps_taken})
 
         # ── NES-only ──────────────────────────────────────────────────────
         if cfg.baselines.run_nes:
@@ -268,6 +322,7 @@ def main():
                             'success': res_sq.success, 'queries': res_sq.queries_used,
                             'steps': res_sq.steps_taken})
 
+        # ── Per-image log line ────────────────────────────────────────────
         parts = [f"ELPD({'✓' if res_elpd.success else '✗'},{res_elpd.queries_used}q)"]
         if cfg.baselines.run_mifgsm:
             parts.append(f"MI({'✓' if res_mi.success else '✗'})")
@@ -275,14 +330,21 @@ def main():
             parts.append(f"NES({'✓' if res_nes.success else '✗'},{res_nes.queries_used}q)")
         logger.info('  %s', '  '.join(parts))
 
+        # Flush CSV checkpoint every 10 images so a crash doesn't lose everything
+        if n_eval % 10 == 0:
+            pd.DataFrame(records).to_csv(RESULTS_CSV, index=False)
+            logger.info('  [checkpoint] %d images saved to %s', n_eval, RESULTS_CSV)
+            print_interim_summary(records)
+
+    run_logger.finish()
+
     if not records:
-        run_logger.finish()
         logger.error('No images evaluated. Check dataset path and config.')
         return
 
-    # ── Results table ─────────────────────────────────────────────────────
+    # ── Final results table ───────────────────────────────────────────────
     df = pd.DataFrame(records)
-    df.to_csv('results/logs/final_results.csv', index=False)
+    df.to_csv(RESULTS_CSV, index=False)
 
     summary = df.groupby('method').agg(
         ASR=('success', 'mean'),
@@ -296,15 +358,17 @@ def main():
 
     run_logger.log_summary(summary['ASR_pct'].to_dict())
 
-    # ── Plots ──────────────────────────────────────────────────────────────
-    checkpoints = [40, 100, 200, 400, 800, 1000, 2000, cfg.attack.query_budget]
-    checkpoints = sorted(set(c for c in checkpoints if c <= cfg.attack.query_budget))
+    # ── Plots ─────────────────────────────────────────────────────────────
+    max_q = cfg.attack.query_budget
+    checkpoints = sorted(set(
+        c for c in [100, 200, 500, 1000, 2000, 3000, 5000, 10000, max_q]
+        if c <= max_q
+    ))
     curves = build_asr_curve(df, checkpoints)
     plot_asr_curves(curves, checkpoints, cfg, 'results/plots/query_vs_asr.png')
     plot_eta_trajectory('results/logs/run_metrics.csv', 'results/plots/eta_trajectory.png')
 
-    run_logger.finish()
-    logger.info('Done. Results in results/logs/ and results/plots/')
+    logger.info('Done. Results → results/logs/ and results/plots/')
 
 
 if __name__ == '__main__':

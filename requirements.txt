@@ -1,0 +1,16 @@
+# Core deep learning
+torch>=2.1.0
+torchvision>=0.16.0
+torchaudio>=2.1.0
+
+# Experiment tracking
+wandb>=0.16.0
+
+# Data & plotting
+pandas>=2.0.0
+matplotlib>=3.7.0
+numpy>=1.24.0
+Pillow>=10.0.0
+
+# Config
+PyYAML>=6.0

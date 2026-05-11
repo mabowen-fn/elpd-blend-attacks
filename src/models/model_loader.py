@@ -29,6 +29,12 @@ from torch import Tensor
 
 logger = logging.getLogger(__name__)
 
+# Known input sizes for architectures that differ from the standard 224
+_ARCH_INPUT_SIZE = {
+    'inception_v3': 299,
+    'inception_v4': 299,
+}
+
 
 class QueryBudgetExceeded(Exception):
     pass
@@ -37,27 +43,24 @@ class QueryBudgetExceeded(Exception):
 # ── Model factory ─────────────────────────────────────────────────────────────
 
 def _load_torchvision_model(arch: str, pretrained: bool) -> nn.Module:
-    """Load a torchvision model by architecture name string."""
-    if not hasattr(tvm, arch):
-        raise ValueError(f"torchvision has no model named '{arch}'")
-    weights_enum = None
-    if pretrained:
-        # torchvision ≥ 0.13 uses weights= API; fall back to pretrained= for older
-        weights_attr = arch.upper().replace("_", "") + "_Weights"
-        # Try the new API first
-        try:
-            weights_cls = getattr(tvm, arch.replace("_bn", "").upper() + "_Weights", None)
-            # Use DEFAULT weights if the class exists
-            if weights_cls is not None:
-                model = getattr(tvm, arch)(weights=weights_cls.DEFAULT)
-            else:
-                # Fallback: let torchvision pick
-                model = getattr(tvm, arch)(pretrained=True)
-        except TypeError:
-            model = getattr(tvm, arch)(pretrained=True)
-    else:
-        model = getattr(tvm, arch)()
-    return model
+    """
+    Load a torchvision model by name, using the new weights= API (torchvision ≥ 0.13).
+
+    The new API exposes a per-arch Weights enum via torchvision.models.get_model_weights().
+    We take DEFAULT weights when pretrained=True, which resolves correctly for every
+    arch in torchvision (resnet50, vgg16_bn, densenet121, efficientnet_b0, etc.).
+    """
+    if not pretrained:
+        return tvm.get_model(arch, weights=None)
+    try:
+        # torchvision ≥ 0.13: get_model / get_model_weights are the stable API
+        weights = tvm.get_model_weights(arch).DEFAULT
+        return tvm.get_model(arch, weights=weights)
+    except AttributeError:
+        # torchvision < 0.13 fallback
+        if not hasattr(tvm, arch):
+            raise ValueError(f"torchvision has no model named '{arch}'")
+        return getattr(tvm, arch)(pretrained=True)
 
 
 # ── Target model (black box) ──────────────────────────────────────────────────
@@ -171,8 +174,10 @@ class SurrogateModel:
         self.device = device
 
         model = _load_torchvision_model(model_cfg.arch, model_cfg.pretrained)
+        # inception_v3 needs aux_logits disabled at eval time
+        if hasattr(model, 'aux_logits'):
+            model.aux_logits = False
         model.eval().to(device)
-        # Surrogate params are frozen — we only need gradient w.r.t. input x
         for p in model.parameters():
             p.requires_grad_(False)
         self._model = model
@@ -182,22 +187,37 @@ class SurrogateModel:
         self._mean = mean
         self._std  = std
 
+        # Some architectures (inception_v3) expect a different input size
+        self._input_size = _ARCH_INPUT_SIZE.get(model_cfg.arch, dataset_cfg.image_size)
+
     def gradient(self, x: Tensor, label: int) -> Tensor:
         """
         Compute ∂CrossEntropy/∂x through the surrogate.
 
         Args:
-            x:     (C, H, W) adversarial example, values in [0,1], no batch dim
+            x:     (C, H, W) adversarial example in [0,1], no batch dim
             label: true class index
 
         Returns:
-            g: (D,) flat gradient tensor (D = C*H*W)
+            g: (D,) flat gradient tensor (D = C*H*W of the INPUT x, not surrogate size)
         """
         x_in = x.unsqueeze(0).requires_grad_(True)          # (1, C, H, W)
-        x_norm = (x_in - self._mean) / self._std
-        logits = self._model(x_norm)                         # (1, n_classes)
-        lbl    = torch.tensor([label], device=self.device)
-        loss   = F.cross_entropy(logits, lbl)
+
+        # Resize to surrogate's expected input size if needed (e.g. inception_v3 = 299)
+        if self._input_size != x.shape[-1]:
+            x_resized = F.interpolate(x_in, size=self._input_size,
+                                      mode='bilinear', align_corners=False)
+        else:
+            x_resized = x_in
+
+        x_norm = (x_resized - self._mean) / self._std
+        # Handle inception_v3 which returns InceptionOutputs namedtuple during training
+        out = self._model(x_norm)
+        logits = out.logits if hasattr(out, 'logits') else out
+        lbl  = torch.tensor([label], device=self.device)
+        loss = F.cross_entropy(logits, lbl)
         loss.backward()
+
+        # Gradient is w.r.t. x_in (original size), not the resized tensor
         g = x_in.grad.detach().view(-1)                      # (D,)
         return g
